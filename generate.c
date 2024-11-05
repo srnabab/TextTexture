@@ -277,6 +277,8 @@ int main(int argc, char * argv[])
             }
         }
     }
+
+    free(utf32Result);
     
     unsigned char * buffer2 = (unsigned char*)calloc(imageWidth * imageHeight * line * characterPerLine, sizeof(unsigned char));
     for (int y = 0;y < line;y++)
