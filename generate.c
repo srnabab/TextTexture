@@ -15,7 +15,8 @@
 #define CHANNELS 1
 #define MAX_2D_SIZW 16383
 
-#define HASH_SIZE 6000
+#define HASH_SIZE 6001
+#define MAX_KICKS 128
 
 typedef struct _HASH
 {
@@ -23,84 +24,96 @@ typedef struct _HASH
     unistring_uint32_t utf32;
 } Hash;
 
-Hash hash[HASH_SIZE];
+Hash hash[2][HASH_SIZE];
 
 static void create_hash(void)
 {
-    for (int i = 0;i < HASH_SIZE;i++)
-    {
-        hash[i].utf32 = 0x110000;
-    }
+    memset(hash, 0, sizeof(hash));
 }
 
 static uint32_t hash_func1(unistring_uint32_t utf32)
 {
-    return utf32 % HASH_SIZE;
+    return (utf32 * 2654435761U) % HASH_SIZE;
 }
 
 static uint32_t hash_func2(unistring_uint32_t utf32)
 {
-    return 1 + utf32 % 5993/*(HASH_SIZE - 1)*/;
+    return (utf32 * 3344921057U) % HASH_SIZE;
 }
 
 static bool insert(unistring_uint32_t utf32)
 {
-    uint32_t n = hash_func1(utf32);
-
-    if (hash[n].utf32 == 0x110000)
-    {
-        hash[n].utf32 = utf32;
-    }
-    else
-    {
-        int i = 1;
-        uint32_t step = hash_func2(utf32);
-        uint32_t index = (n + step) % HASH_SIZE;
-        while (i <= 6000)
-        {
-            if (hash[index].utf32 == 0x110000)
-            {
-                hash[index].utf32 = utf32;
-            }
-            i++;
-            index = (n + i * step) % HASH_SIZE;
-        }
-        if (i == 6001)
-        {
-            return false;
-        }
-        hash[index].utf32 = utf32;
+    int pos1 = hash_func1(utf32);
+    if (hash[0][pos1].utf32 == 0) 
+    {  // 空位直接插入
+        hash[0][pos1].utf32 = utf32;
+        return true;
     }
 
-    return true;
+    int pos2 = hash_func2(utf32);
+    if (hash[1][pos2].utf32 == 0) 
+    {  // 第二个表也检查
+        hash[1][pos2].utf32 = utf32;
+        return true;
+    }
+
+    // 否则，开始踢出过程
+    for (int i = 0; i < MAX_KICKS; i++) 
+    {
+        int temp = hash[0][pos1].utf32;
+        hash[0][pos1].utf32 = utf32;
+        utf32 = temp;  // 被踢出的元素
+        
+        pos2 = hash_func2(utf32);
+        if (hash[1][pos2].utf32 == 0) 
+        {
+            hash[1][pos2].utf32 = utf32;
+            return true;
+        }
+        
+        // 再次踢出
+        temp = hash[1][pos2].utf32;
+        hash[1][pos2].utf32 = utf32;
+        utf32 = temp;
+        
+        pos1 = hash_func1(utf32);
+        if (hash[0][pos1].utf32 == 0) 
+        {
+            hash[0][pos1].utf32 = utf32;
+            return true;
+        }
+    }
+    return false;
 }
 
-static int find_value(unistring_uint32_t utf32)
+static bool look_up(unistring_uint32_t utf32)
 {
-    uint32_t n = hash_func1(utf32);
+    return (hash[0][hash_func1(utf32)].utf32 == utf32) | (hash[1][hash_func2(utf32)].utf32 == utf32);
+}
 
-    if (hash[n].utf32 == 0x110000)
+typedef struct _Index
+{
+    int a;
+    uint32_t b;
+} Index;
+
+static Index find_value(unistring_uint32_t utf32)
+{
+    uint32_t pos1 = hash_func1(utf32);
+
+    if (hash[0][pos1].utf32 == utf32)
     {
-        return -1;
+        return (Index){0, pos1};
     }
-    else if (hash[n].utf32 == utf32)
+    
+    uint32_t pos2 = hash_func2(utf32);
+    if (hash[1][pos2].utf32 == utf32)
     {
-        return n;
+        return (Index){1, pos2};
     }
     else
     {
-        int i = 1;
-        uint32_t step = hash_func2(utf32);
-        uint32_t index = (n + step) % HASH_SIZE;
-        while (i <= 6000)
-        {
-            if (hash[index].utf32 == utf32)
-                return index;
-            i++;
-            index = (n + i * step) % HASH_SIZE;
-        }
-
-        return -1;
+        return (Index){-1, 0};
     }
 }
 
@@ -180,11 +193,10 @@ int main(int argc, char * argv[])
         return -1;
     }
 
-    unistring_uint32_t * string;
     size_t utf32Len;
 
-    unistring_uint32_t * utf32Result = u8_to_u32(text, size, string, &utf32Len);
-    if (string == NULL)
+    unistring_uint32_t * utf32Result = u8_to_u32(text, size, NULL, &utf32Len);
+    if (utf32Result == NULL)
     {
         printf("convert failed\n");
         return -1;
@@ -194,7 +206,7 @@ int main(int argc, char * argv[])
 
     for (int i = 0;i < utf32Len;i++)
     {
-        if (find_value(utf32Result[i]) >= 0)
+        if (look_up(utf32Result[i]))
             continue;
         else
         {
@@ -225,20 +237,26 @@ int main(int argc, char * argv[])
     {
         FT_ULong utf32 = utf32Result[index[i]];
         unicode_char[i] = utf32;
-        int n = find_value(utf32);
+        Index n = find_value(utf32);
         
+        if (n.a < 0)
+        {
+            printf("less than 0(%lu)\n", utf32);
+            exit(0);
+        }
+
         static int yStep = 0;
         static int xStep = 0;
         float xOffsets = xStep * xOffset;
         float yOffsets = yStep * yOffset;
-        hash[n].uv[0][0] = xOffsets;
-        hash[n].uv[0][1] = yOffsets + yOffset;
-        hash[n].uv[1][0] = xOffsets + xOffset;
-        hash[n].uv[1][1] = yOffsets + yOffset;
-        hash[n].uv[2][0] = xOffsets + xOffset;
-        hash[n].uv[2][1] = yOffsets;
-        hash[n].uv[3][0] = xOffsets;
-        hash[n].uv[3][1] = yOffsets;
+        hash[n.a][n.b].uv[0][0] = xOffsets;
+        hash[n.a][n.b].uv[0][1] = yOffsets + yOffset;
+        hash[n.a][n.b].uv[1][0] = xOffsets + xOffset;
+        hash[n.a][n.b].uv[1][1] = yOffsets + yOffset;
+        hash[n.a][n.b].uv[2][0] = xOffsets + xOffset;
+        hash[n.a][n.b].uv[2][1] = yOffsets;
+        hash[n.a][n.b].uv[3][0] = xOffsets;
+        hash[n.a][n.b].uv[3][1] = yOffsets;
         
         xStep = (xStep + 1) % characterPerLine;
         yStep = i / characterPerLine;
@@ -299,7 +317,7 @@ int main(int argc, char * argv[])
     }
     else
     {
-        fwrite(hash, sizeof(Hash), HASH_SIZE, fp);
+        fwrite(hash, sizeof(Hash), HASH_SIZE * 2, fp);
         fclose(fp);
     }
 
